@@ -1,0 +1,150 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for an AWS CodeDeploy stack.  It attempts to standardize names of services deployed.
+
+Parameters:
+  Application:
+    Description: CodeDeploy Application name.
+    Type: String
+
+  ComputePlatform:
+    Description: The compute platform to use for deployments.  Default: Server (EC2/On-premise)
+    Type: String
+    Default: 'Server'
+    AllowedValues:
+      - Server
+      - ECS
+      - Lambda
+
+  DeploymentType:
+    Description: Web or App deployment group type (to be used in the Application's Deployment Group
+    Type: String
+    Default: Web
+    AllowedValues:
+      - Web
+      - Api
+
+  ServiceRoleArn:
+    Description: The service role ARN that grants CodeDeploy permission to make calls to AWS services (modify this to your needs - probably a better mechanism)
+    Type: String
+    AllowedValues:
+      - 'arn:aws:iam::<account_id1>:role/<role1>'
+      - 'arn:aws:iam::<account_id2>:role/<role2>'
+
+  TagKey:
+    Description: The Tag key applied to systems to be included in the Deployment Group.
+    Type: String
+    Default: 'CodeDeploy'
+
+  EC2Instances:
+    Description: The EC2 instance(s) to apply the key/value to, making it a member of the Deployment Group.
+    Type: List<AWS::EC2::Instance::Id>
+
+Resources:
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Ref Application
+      ComputePlatform: !Ref ComputePlatform
+
+  CodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: CodeDeployApplication
+    Properties:
+      ApplicationName: !Ref Application
+      DeploymentConfigName: CodeDeployDefault.AllAtOnce
+      DeploymentGroupName: !Sub '${Application}_${DeploymentType}'
+      ServiceRoleArn: !Ref ServiceRoleArn
+      Ec2TagFilters:
+        - Key: !Ref TagKey
+          Value: !Sub '${Application}_${DeploymentType}'
+          Type: 'KEY_AND_VALUE'
+
+  ModifyTagOnInstances:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      TemplateBody: !Sub |
+        {% for instance in ${EC2Instances} %}
+          {% set name = instance.replace('-', '') + "ModifyTags" %}
+          {{ name }}:
+            Type: Custom::ModifyTags
+            Properties:
+              ServiceToken: !GetAtt ModifyTagsLambdaFunction.Arn
+              InstanceId: {{insstance}}
+              TagKey: !Ref TagKey
+              TagValue: !Ref TagValue
+        {% endfor %}
+
+  ModifyTagsLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.10
+      Handler: index.lambda_handler
+      Role: !GetAtt ModifyTagsLambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import cfnresponse
+
+          def lambda_handler(event, context):
+            ec2 = boto3.client('ec2')
+            print(json.dumps(event))
+            instances = event['ResourceProperties']['InstanceId']
+            tag_key = ''.join(event['ResourceProperties']['InstanceId'])
+            tag_value = ''.join(even['ResourceProperties']['TagValue'])
+            # Add/Modify tags
+            for instance_id in instances:
+              ec2.create_tags(
+                Resources=[instance_id],
+                Tags=[
+                  {
+                    'Key": tag_key,
+                    'Value': tag_value
+                  }
+                ]
+              )
+
+              responseData = {}
+              cfnresponse.send(even, context, cfnresponse.SUCCESS, responseData)
+
+  ModifyTagsLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect Allow
+            Principal:
+              Services:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+        Path: /
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+        Policies:
+          - PolicyName EC2Permissions
+            PolicyDocument:
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - ec2:CreateTags
+                  Resource: '*'
+
+Outputs:
+  CodeDeployApplication:
+    Description: AWS CodeDeploy application name
+    Value: !Ref Application
+  CodeDeployDeplomentGroup:
+    Description: AWS CodeDeploy Deployment Group
+    Value: !Sub '${Application}_${DeploymentType}'
+  CodeDeployTagKey:
+    Description: The tag key to be applied to systems included in this Deployment Group
+    Value: !Ref TagKey
+  CodeDeployTagValue:
+    Description: The tag value to be applied to systems included in this Deployment Group
+    Value: !Sub '${Application}_${DeploymentType}'
+  ModifiedInstances:
+    Description: Instances tagged to be part of the new Deployment Group
+    Value: !Ref EC2Instances
