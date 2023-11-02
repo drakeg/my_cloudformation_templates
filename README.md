@@ -1,0 +1,2 @@
+# my_cloudformation_templates
+Various Cloudformation templates
